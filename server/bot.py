@@ -36,7 +36,6 @@ from pipecat.processors.frameworks.rtvi import (
     RTVIProcessor,
     RTVIServerMessageFrame,
 )
-from pipecat.services.cartesia.tts import CartesiaTTSService
 from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.google.llm import GoogleLLMService
 from pipecat.transports.daily.transport import DailyParams, DailyTransport
@@ -144,21 +143,17 @@ class SmartTurnMetricsProcessor(FrameProcessor):
 
 
 async def main(transport: DailyTransport):
-    # Configure your STT, LLM, and TTS services here
+    # Configure your STT and LLM services here
     # Swap out different processors or properties to customize your bot
     stt = DeepgramSTTService(api_key=os.getenv("DEEPGRAM_API_KEY"))
     llm = GoogleLLMService(api_key=os.getenv("GOOGLE_API_KEY"))
-    tts = CartesiaTTSService(
-        api_key=os.getenv("CARTESIA_API_KEY"),
-        voice_id="71a7ad14-091c-4e8e-a314-022ece01c121",  # British Reading Lady
-    )
 
     # Set up the initial context for the conversation
     # You can specified initial system and assistant messages here
     messages = [
         {
             "role": "system",
-            "content": "You are Chatbot, a friendly, helpful robot. Your goal is to demonstrate your capabilities in a succinct way. Your output will be converted to audio so don't include special characters in your answers. Respond to what the user said in a creative and helpful way, but keep your responses brief. Start by introducing yourself.",
+            "content": "You are Chatbot, a friendly, helpful robot. Your goal is to demonstrate your capabilities in a succinct way. Respond to what the user said in a creative and helpful way, but keep your responses brief and easy to read as plain text. Start by introducing yourself.",
         },
     ]
 
@@ -182,7 +177,6 @@ async def main(transport: DailyTransport):
             stt,
             context_aggregator.user(),
             llm,
-            tts,
             ta,
             transport.output(),
             context_aggregator.assistant(),
@@ -241,7 +235,7 @@ async def bot(args: DailySessionArguments):
             params=DailyParams(
                 audio_in_enabled=True,
                 audio_in_filter=KrispFilter(),
-                audio_out_enabled=True,
+                audio_out_enabled=False,
                 video_out_enabled=True,
                 video_out_width=1024,
                 video_out_height=576,
@@ -272,7 +266,7 @@ async def local_daily():
                 "Smart Turn Bot",
                 params=DailyParams(
                     audio_in_enabled=True,
-                    audio_out_enabled=True,
+                    audio_out_enabled=False,
                     video_out_enabled=True,
                     video_out_width=1024,
                     video_out_height=576,
