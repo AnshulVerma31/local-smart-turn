@@ -138,7 +138,7 @@ class SmartTurnMetricsProcessor(FrameProcessor):
 
                     # Send the data to the client via RTVI
                     rtvi_frame = RTVIServerMessageFrame(data=smart_turn_data)
-                    await self.push_frame(rtvi_frame)
+                    await self.push_frame(rtvi_frame, FrameDirection.UPSTREAM)
 
         await self.push_frame(frame, direction)
 
@@ -179,7 +179,7 @@ async def main(transport: DailyTransport):
     smart_turn_metrics_processor = SmartTurnMetricsProcessor()
 
     # RTVI events for Pipecat client UI
-    rtvi = RTVIProcessor(config=RTVIConfig(config=[]))
+    rtvi = RTVIProcessor(config=RTVIConfig(config=[]), transport=transport)
 
     # A core voice AI pipeline
     # Add additional processors to customize the bot's behavior
