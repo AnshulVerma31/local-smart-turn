@@ -9,6 +9,7 @@ import os
 import sys
 
 import aiohttp
+from deepgram.clients.listen.v1.websocket.options import LiveOptions
 from dotenv import load_dotenv
 from loguru import logger
 from PIL import Image
@@ -145,7 +146,20 @@ class SmartTurnMetricsProcessor(FrameProcessor):
 async def main(transport: DailyTransport):
     # Configure your STT and LLM services here
     # Swap out different processors or properties to customize your bot
-    stt = DeepgramSTTService(api_key=os.getenv("DEEPGRAM_API_KEY"))
+    stt = DeepgramSTTService(
+        api_key=os.getenv("DEEPGRAM_API_KEY"),
+        live_options=LiveOptions(
+            model="nova-3-general",
+            interim_results=True,
+            punctuate=True,
+            smart_format=True,
+        ),
+    )
+
+    # Enable multilingual captioning (English + Hindi) with automatic detection.
+    stt._settings.pop("language", None)
+    stt._settings["detect_language"] = True
+    stt._settings["languages"] = ["en", "hi"]
     llm = GoogleLLMService(api_key=os.getenv("GOOGLE_API_KEY"))
 
     # Set up the initial context for the conversation

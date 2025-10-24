@@ -8,6 +8,7 @@ import {
 import { ConnectButton } from '../components/ConnectButton';
 import { StatusDisplay } from '../components/StatusDisplay';
 import { DebugDisplay } from '../components/DebugDisplay';
+import { TranscriptionWindows } from '../components/TranscriptionWindows';
 
 function BotVideo() {
   const transportState = usePipecatClientTransportState();
@@ -31,7 +32,12 @@ export default function Home() {
       </div>
 
       <div className="main-content">
-        <BotVideo />
+        <div className="main-grid">
+          <div className="bot-section">
+            <BotVideo />
+          </div>
+          <TranscriptionWindows />
+        </div>
       </div>
 
       <DebugDisplay />

@@ -48,6 +48,21 @@ button:disabled {
   border-radius: 8px;
   padding: 20px;
   margin-bottom: 20px;
+  display: flex;
+  flex-direction: column;
+}
+
+.main-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
+  gap: 24px;
+  align-items: flex-start;
+}
+
+.bot-section {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
 }
 
 .bot-container {
@@ -63,6 +78,16 @@ button:disabled {
   margin-bottom: 20px;
   border-radius: 8px;
   overflow: hidden;
+}
+
+@media (max-width: 1024px) {
+  .main-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .video-container {
+    width: 100%;
+  }
 }
 
 .video-container video {
