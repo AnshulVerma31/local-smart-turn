@@ -22,6 +22,12 @@ type TranscriptSegment = {
   isCommand?: boolean;
 };
 
+type LLMOutput = {
+  id: string;
+  text: string;
+  timestamp: number;
+};
+
 type SummaryState = {
   items: string[];
   updatedAt: number;
@@ -32,6 +38,8 @@ type SummaryState = {
 const SUMMARY_WINDOW_MS = 10_000;
 const HISTORY_WINDOW_MS = 5 * 60 * 1000;
 const MAX_SEGMENTS = 200;
+const MAX_LLM_ENTRIES = 100;
+const SUMMARY_COMMANDS = new Set(['summary', 'summarize']);
 
 const createId = (prefix: string) =>
   `${prefix}-${
@@ -309,17 +317,61 @@ export function TranscriptionWindows() {
   const [segments, setSegments] = useState<TranscriptSegment[]>([]);
   const [partialUser, setPartialUser] = useState('');
   const [summaryState, setSummaryState] = useState<SummaryState | null>(null);
+  const [llmOutputs, setLlmOutputs] = useState<LLMOutput[]>([]);
   const segmentsRef = useRef<TranscriptSegment[]>([]);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const llmScrollRef = useRef<HTMLDivElement>(null);
 
   const pushSegment = useCallback((segment: TranscriptSegment) => {
     setSegments((current) => {
-      const now = segment.timestamp;
-      const next = [...current, segment]
+      const trimmedText = segment.text.trim();
+      if (!trimmedText.length) {
+        segmentsRef.current = current;
+        return current;
+      }
+
+      const normalized: TranscriptSegment = { ...segment, text: trimmedText };
+      const last = current[current.length - 1];
+      if (
+        last &&
+        last.speaker === normalized.speaker &&
+        last.text === normalized.text
+      ) {
+        segmentsRef.current = current;
+        return current;
+      }
+
+      const now = normalized.timestamp;
+      const next = [...current, normalized]
         .filter((item) => now - item.timestamp <= HISTORY_WINDOW_MS)
         .slice(-MAX_SEGMENTS);
 
       segmentsRef.current = next;
+      return next;
+    });
+  }, []);
+
+  const pushLlmOutput = useCallback((text: string, timestamp: number) => {
+    setLlmOutputs((current) => {
+      const trimmed = text.trim();
+      if (!trimmed.length) {
+        return current;
+      }
+
+      const last = current[current.length - 1];
+      if (last && last.text === trimmed) {
+        return current;
+      }
+
+      const next = [
+        ...current,
+        {
+          id: createId('llm'),
+          text: trimmed,
+          timestamp,
+        },
+      ].slice(-MAX_LLM_ENTRIES);
+
       return next;
     });
   }, []);
@@ -329,6 +381,7 @@ export function TranscriptionWindows() {
     setSegments([]);
     setPartialUser('');
     setSummaryState(null);
+    setLlmOutputs([]);
   }, []);
 
   useEffect(() => {
@@ -378,14 +431,14 @@ export function TranscriptionWindows() {
       if (data.final) {
         const timestamp = toTimestamp(data.timestamp);
         const normalized = sanitizeForCommand(data.text);
-        const isSummaryCommand = normalized === 'summary';
+        const isSummaryCommand = SUMMARY_COMMANDS.has(normalized);
 
         pushSegment({
           id: createId('user'),
           speaker: 'user',
           text: data.text,
           timestamp,
-          isCommand: normalized === 'summary',
+          isCommand: isSummaryCommand,
         });
         setPartialUser('');
 
@@ -399,23 +452,44 @@ export function TranscriptionWindows() {
     [pushSegment, updateSummary]
   );
 
-  const handleBotTranscript = useCallback(
-    (data: BotLLMTextData) => {
-      if (!data.text) {
+  const handleBotText = useCallback(
+    (text?: string, source?: 'transcript' | 'llm') => {
+      if (!text) {
         return;
       }
+
+      const timestamp = Date.now();
       pushSegment({
         id: createId('bot'),
         speaker: 'bot',
-        text: data.text,
-        timestamp: Date.now(),
+        text,
+        timestamp,
       });
+
+      if (source === 'llm') {
+        pushLlmOutput(text, timestamp);
+      }
     },
-    [pushSegment]
+    [pushLlmOutput, pushSegment]
+  );
+
+  const handleBotTranscript = useCallback(
+    (data: BotLLMTextData) => {
+      handleBotText(data.text, 'transcript');
+    },
+    [handleBotText]
+  );
+
+  const handleBotLlmText = useCallback(
+    (data: BotLLMTextData) => {
+      handleBotText(data.text, 'llm');
+    },
+    [handleBotText]
   );
 
   useRTVIClientEvent(RTVIEvent.UserTranscript, handleUserTranscript);
   useRTVIClientEvent(RTVIEvent.BotTranscript, handleBotTranscript);
+  useRTVIClientEvent(RTVIEvent.BotLlmText, handleBotLlmText);
 
   useEffect(() => {
     const container = scrollRef.current;
@@ -424,6 +498,14 @@ export function TranscriptionWindows() {
     }
     container.scrollTop = container.scrollHeight;
   }, [segments, partialUser]);
+
+  useEffect(() => {
+    const container = llmScrollRef.current;
+    if (!container) {
+      return;
+    }
+    container.scrollTop = container.scrollHeight;
+  }, [llmOutputs]);
 
   const summaryHeader = useMemo(() => {
     if (!summaryState) {
@@ -489,6 +571,33 @@ export function TranscriptionWindows() {
           ) : (
             <p className="summary-placeholder">
               No summary yet. Ask for one by saying “Summary.”
+            </p>
+          )}
+        </div>
+      </div>
+
+      <div className="window-card llm-output">
+        <div className="window-header">
+          <h3>LLM Output</h3>
+          <span className="window-subtitle">
+            Latest responses from the assistant
+          </span>
+        </div>
+        <div className="llm-output-body">
+          {llmOutputs.length ? (
+            <div className="llm-output-scroll" ref={llmScrollRef}>
+              {llmOutputs.map((entry) => (
+                <div key={entry.id} className="llm-output-item">
+                  <span className="llm-output-meta">
+                    {formatTime(entry.timestamp)}
+                  </span>
+                  <span className="llm-output-text">{entry.text}</span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="llm-output-placeholder">
+              LLM responses will appear here once you start a conversation.
             </p>
           )}
         </div>
