@@ -24,3 +24,48 @@
 .debug-log div {
   margin-bottom: 4px;
 }
+
+.noun-tracker {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid #e0e0e0;
+}
+
+.noun-tracker h4 {
+  margin: 0 0 8px 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.noun-tracker ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+}
+
+.noun-tracker li {
+  font-size: 13px;
+  background: #f0f4ff;
+  border-radius: 12px;
+  padding: 6px 10px;
+  display: inline-flex;
+  align-items: center;
+}
+
+.noun-word {
+  font-weight: 600;
+}
+
+.noun-color {
+  color: #555;
+  font-weight: 500;
+}
+
+.noun-placeholder {
+  margin: 0;
+  font-size: 13px;
+  color: #777;
+}
