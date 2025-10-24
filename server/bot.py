@@ -20,10 +20,15 @@ from pipecat.frames.frames import (
     BotStartedSpeakingFrame,
     BotStoppedSpeakingFrame,
     Frame,
+    InterimTranscriptionFrame,
+    LLMFullResponseEndFrame,
+    LLMFullResponseStartFrame,
     LLMRunFrame,
+    LLMTextFrame,
     MetricsFrame,
     OutputImageRawFrame,
     SpriteFrame,
+    TranscriptionFrame,
 )
 from pipecat.metrics.metrics import SmartTurnMetricsData
 from pipecat.pipeline.pipeline import Pipeline
@@ -36,11 +41,21 @@ from pipecat.processors.frameworks.rtvi import (
     RTVIObserver,
     RTVIProcessor,
     RTVIServerMessageFrame,
+    RTVITextMessageData,
+    RTVIUserTranscriptionMessage,
+    RTVIUserTranscriptionMessageData,
+    RTVIBotLLMTextMessage,
+    RTVIBotTranscriptionMessage,
 )
 from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.google.llm import GoogleLLMService
 from pipecat.transports.daily.transport import DailyParams, DailyTransport
 from pipecatcloud.agent import DailySessionArguments
+
+import re
+import time
+from collections import deque
+from dataclasses import dataclass
 
 load_dotenv(override=True)
 
@@ -69,6 +84,70 @@ sprites.extend(flipped)
 # Define static and animated states
 quiet_frame = sprites[0]  # Static frame for when bot is listening
 talking_frame = SpriteFrame(images=sprites)  # Animation sequence for when bot is talking
+
+
+@dataclass
+class ConversationEntry:
+    speaker: str
+    text: str
+    timestamp: float
+    is_command: bool = False
+
+
+class ConversationHistory:
+    """Simple in-memory conversation history for logging and summaries."""
+
+    def __init__(self, *, max_age_secs: float = 300.0, max_entries: int = 200):
+        self._entries: deque[ConversationEntry] = deque(maxlen=max_entries)
+        self._max_age_secs = max_age_secs
+
+    def add(self, speaker: str, text: str, *, is_command: bool = False):
+        entry = ConversationEntry(
+            speaker=speaker,
+            text=text.strip(),
+            timestamp=time.time(),
+            is_command=is_command,
+        )
+        if not entry.text:
+            return
+        self._entries.append(entry)
+        self._prune()
+
+    def _prune(self):
+        cutoff = time.time() - self._max_age_secs
+        while self._entries and self._entries[0].timestamp < cutoff:
+            self._entries.popleft()
+
+    def recent(self, window_secs: float, *, include_commands: bool = False) -> list[ConversationEntry]:
+        cutoff = time.time() - window_secs
+        return [
+            entry
+            for entry in self._entries
+            if entry.timestamp >= cutoff and (include_commands or not entry.is_command)
+        ]
+
+
+SUMMARY_COMMANDS = {"summary", "summarize"}
+SUMMARY_WINDOW_SECS = 10.0
+
+
+def sanitize_command(text: str) -> str:
+    lowered = text.lower()
+    cleaned = re.sub(r"[^\w\s]", " ", lowered, flags=re.UNICODE)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def build_summary(entries: list[ConversationEntry]) -> list[str]:
+    if not entries:
+        return []
+
+    # Provide up to three of the most recent messages as a lightweight summary.
+    recent = entries[-3:]
+    bullets = []
+    for entry in recent:
+        prefix = "You" if entry.speaker == "user" else "Bot"
+        bullets.append(f"{prefix}: {entry.text}")
+    return bullets
 
 
 class TalkingAnimation(FrameProcessor):
@@ -143,6 +222,101 @@ class SmartTurnMetricsProcessor(FrameProcessor):
         await self.push_frame(frame, direction)
 
 
+class TranscriptionBroadcastProcessor(FrameProcessor):
+    """Broadcasts transcription updates to RTVI clients and backend logs."""
+
+    def __init__(self, rtvi: RTVIProcessor, history: ConversationHistory):
+        super().__init__()
+        self._rtvi = rtvi
+        self._history = history
+
+    async def _send_user_transcription(self, frame: TranscriptionFrame | InterimTranscriptionFrame, *, final: bool):
+        if not self._rtvi:
+            return
+        message = RTVIUserTranscriptionMessage(
+            data=RTVIUserTranscriptionMessageData(
+                text=frame.text,
+                user_id=frame.user_id,
+                timestamp=frame.timestamp,
+                final=final,
+            )
+        )
+        await self._rtvi.push_transport_message(message)
+
+    async def _log_summary(self):
+        recent_entries = self._history.recent(SUMMARY_WINDOW_SECS)
+        bullets = build_summary(recent_entries)
+        if not bullets:
+            logger.info("Summary requested but no recent conversation to summarize.")
+            return
+
+        logger.info("Summary of the last %.0f seconds:", SUMMARY_WINDOW_SECS)
+        for bullet in bullets:
+            logger.info(" • %s", bullet)
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+
+        if isinstance(frame, InterimTranscriptionFrame):
+            logger.debug("User interim transcript: %s", frame.text)
+            await self._send_user_transcription(frame, final=False)
+        elif isinstance(frame, TranscriptionFrame):
+            logger.info("User transcript: %s", frame.text)
+            sanitized = sanitize_command(frame.text)
+            is_summary = sanitized in SUMMARY_COMMANDS if sanitized else False
+            self._history.add("user", frame.text, is_command=is_summary)
+            await self._send_user_transcription(frame, final=True)
+            if is_summary:
+                await self._log_summary()
+
+        await self.push_frame(frame, direction)
+
+
+class LLMOutputBroadcastProcessor(FrameProcessor):
+    """Streams LLM text outputs to RTVI clients and logs bot responses."""
+
+    def __init__(self, rtvi: RTVIProcessor, history: ConversationHistory):
+        super().__init__()
+        self._rtvi = rtvi
+        self._history = history
+        self._buffer: list[str] = []
+
+    async def _send_llm_chunk(self, text: str):
+        if not self._rtvi:
+            return
+        message = RTVIBotLLMTextMessage(data=RTVITextMessageData(text=text))
+        await self._rtvi.push_transport_message(message)
+
+    async def _flush_bot_transcript(self):
+        if not self._buffer:
+            return
+        full_text = "".join(self._buffer).strip()
+        self._buffer.clear()
+        if not full_text:
+            return
+
+        logger.info("Bot response: %s", full_text)
+        self._history.add("bot", full_text)
+        if self._rtvi:
+            message = RTVIBotTranscriptionMessage(data=RTVITextMessageData(text=full_text))
+            await self._rtvi.push_transport_message(message)
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+
+        if isinstance(frame, LLMFullResponseStartFrame):
+            self._buffer.clear()
+        elif isinstance(frame, LLMTextFrame):
+            if frame.text:
+                logger.debug("Bot LLM chunk: %s", frame.text)
+                self._buffer.append(frame.text)
+                await self._send_llm_chunk(frame.text)
+        elif isinstance(frame, LLMFullResponseEndFrame):
+            await self._flush_bot_transcript()
+
+        await self.push_frame(frame, direction)
+
+
 async def main(transport: DailyTransport):
     # Configure your STT and LLM services here
     # Swap out different processors or properties to customize your bot
@@ -177,9 +351,12 @@ async def main(transport: DailyTransport):
 
     ta = TalkingAnimation()
     smart_turn_metrics_processor = SmartTurnMetricsProcessor()
+    conversation_history = ConversationHistory()
 
     # RTVI events for Pipecat client UI
     rtvi = RTVIProcessor(config=RTVIConfig(config=[]), transport=transport)
+    transcription_broadcaster = TranscriptionBroadcastProcessor(rtvi, conversation_history)
+    llm_output_broadcaster = LLMOutputBroadcastProcessor(rtvi, conversation_history)
 
     # A core voice AI pipeline
     # Add additional processors to customize the bot's behavior
@@ -189,8 +366,10 @@ async def main(transport: DailyTransport):
             rtvi,
             smart_turn_metrics_processor,
             stt,
+            transcription_broadcaster,
             context_aggregator.user(),
             llm,
+            llm_output_broadcaster,
             ta,
             transport.output(),
             context_aggregator.assistant(),
